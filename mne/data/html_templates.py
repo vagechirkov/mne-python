@@ -1,7 +1,7 @@
 from ..externals.tempita import Template
 
 
-info_template = Template(u"""
+info_template = Template("""
 <h4>{{caption}}</h4>
 <table class="table table-hover">
     <tr>
@@ -57,7 +57,7 @@ info_template = Template(u"""
 </table>
 """)
 
-raw_template = Template(u"""
+raw_template = Template("""
 {{info_repr[:-9]}}
     <tr>
         <th>Filenames</th>
