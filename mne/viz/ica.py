@@ -254,7 +254,8 @@ def _get_psd_label_and_std(this_psd, dB, ica, num_std):
 def plot_ica_properties(ica, inst, picks=None, axes=None, dB=True,
                         plot_std=True, topomap_args=None, image_args=None,
                         psd_args=None, figsize=None, show=True, reject='auto',
-                        reject_by_annotation=True, *, verbose=None):
+                        reject_by_annotation=True, *, precomputed_data=None,
+                        verbose=None):
     """Display component properties.
 
     Properties include the topography, epochs image, ERP/ERF, power
@@ -319,14 +320,10 @@ def plot_ica_properties(ica, inst, picks=None, axes=None, dB=True,
     -----
     .. versionadded:: 0.13
     """
-    from ..io.base import BaseRaw
-    from ..epochs import BaseEpochs
     from ..preprocessing import ICA
-    from ..io import RawArray
 
     # input checks and defaults
     # -------------------------
-    _validate_type(inst, (BaseRaw, BaseEpochs), "inst", "Raw or Epochs")
     _validate_type(ica, ICA, "ica", "ICA")
     _validate_type(plot_std, (bool, 'numeric'), 'plot_std')
     if isinstance(plot_std, bool):
@@ -367,48 +364,11 @@ def plot_ica_properties(ica, inst, picks=None, axes=None, dB=True,
 
     # calculations
     # ------------
-
-    if isinstance(inst, BaseRaw):
-        # when auto, delegate reject to the ica
-        from ..epochs import make_fixed_length_epochs
-        if reject == 'auto':
-            reject = getattr(ica, 'reject_', None)
-        if reject is None:
-            drop_inds = None
-            dropped_indices = []
-            # break up continuous signal into segments
-            epochs_src = make_fixed_length_epochs(
-                ica.get_sources(inst),
-                duration=2,
-                preload=True,
-                reject_by_annotation=reject_by_annotation,
-                proj=False,
-                verbose=False)
-        else:
-            data = inst.get_data()
-            data, drop_inds = _reject_data_segments(data, ica.reject_,
-                                                    flat=None, decim=None,
-                                                    info=inst.info,
-                                                    tstep=2.0)
-            inst_rejected = RawArray(data, inst.info)
-            # break up continuous signal into segments
-            epochs_src = make_fixed_length_epochs(
-                ica.get_sources(inst_rejected),
-                duration=2,
-                preload=True,
-                reject_by_annotation=reject_by_annotation,
-                proj=False,
-                verbose=False)
-            # getting dropped epochs indexes
-            dropped_indices = [(d[0] // len(epochs_src.times)) + 1
-                               for d in drop_inds]
-        kind = "Segment"
+    if not isinstance(precomputed_data, tuple):
+        kind, dropped_indices, epochs_src = precomputed_data
     else:
-        drop_inds = None
-        epochs_src = ica.get_sources(inst)
-        dropped_indices = []
-        kind = "Epochs"
-
+        kind, dropped_indices, epochs_src = _prepare_data_plot_ica_properties(
+            inst, ica, reject_by_annotation, reject)
     data = epochs_src.get_data()
     ica_data = np.swapaxes(data[:, picks, :], 0, 1)
     dropped_src = ica_data
@@ -467,6 +427,56 @@ def plot_ica_properties(ica, inst, picks=None, axes=None, dB=True,
 
     plt_show(show)
     return all_fig
+
+
+def _prepare_data_plot_ica_properties(inst, ica, reject_by_annotation=True,
+                                      reject='auto'):
+    from ..io.base import BaseRaw
+    from ..io import RawArray
+    from ..epochs import BaseEpochs
+
+    _validate_type(inst, (BaseRaw, BaseEpochs), "inst", "Raw or Epochs")
+    if isinstance(inst, BaseRaw):
+        # when auto, delegate reject to the ica
+        from ..epochs import make_fixed_length_epochs
+        if reject == 'auto':
+            reject = getattr(ica, 'reject_', None)
+        if reject is None:
+            drop_inds = None
+            dropped_indices = []
+            # break up continuous signal into segments
+            epochs_src = make_fixed_length_epochs(
+                ica.get_sources(inst),
+                duration=2,
+                preload=True,
+                reject_by_annotation=reject_by_annotation,
+                proj=False,
+                verbose=False)
+        else:
+            data = inst.get_data()
+            data, drop_inds = _reject_data_segments(data, ica.reject_,
+                                                    flat=None, decim=None,
+                                                    info=inst.info,
+                                                    tstep=2.0)
+            inst_rejected = RawArray(data, inst.info)
+            # break up continuous signal into segments
+            epochs_src = make_fixed_length_epochs(
+                ica.get_sources(inst_rejected),
+                duration=2,
+                preload=True,
+                reject_by_annotation=reject_by_annotation,
+                proj=False,
+                verbose=False)
+            # getting dropped epochs indexes
+            dropped_indices = [(d[0] // len(epochs_src.times)) + 1
+                               for d in drop_inds]
+        kind = "Segment"
+    else:
+        drop_inds = None
+        epochs_src = ica.get_sources(inst)
+        dropped_indices = []
+        kind = "Epochs"
+    return kind, dropped_indices, epochs_src
 
 
 def _plot_ica_sources_evoked(evoked, picks, exclude, title, show, ica,
