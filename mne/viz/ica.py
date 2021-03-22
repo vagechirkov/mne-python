@@ -254,8 +254,7 @@ def _get_psd_label_and_std(this_psd, dB, ica, num_std):
 def plot_ica_properties(ica, inst, picks=None, axes=None, dB=True,
                         plot_std=True, topomap_args=None, image_args=None,
                         psd_args=None, figsize=None, show=True, reject='auto',
-                        reject_by_annotation=True, *, precomputed_data=None,
-                        verbose=None):
+                        reject_by_annotation=True, *, verbose=None):
     """Display component properties.
 
     Properties include the topography, epochs image, ERP/ERF, power
@@ -364,12 +363,9 @@ def plot_ica_properties(ica, inst, picks=None, axes=None, dB=True,
 
     # calculations
     # ------------
-    if not isinstance(precomputed_data, tuple):
-        kind, dropped_indices, epochs_src = precomputed_data
-    else:
-        kind, dropped_indices, epochs_src = _prepare_data_plot_ica_properties(
-            inst, ica, reject_by_annotation, reject)
-    data = epochs_src.get_data()
+
+    kind, dropped_indices, epochs_src, data = _prepare_data_ica_properties(
+        inst, ica, reject_by_annotation, reject)
     ica_data = np.swapaxes(data[:, picks, :], 0, 1)
     dropped_src = ica_data
 
@@ -429,7 +425,120 @@ def plot_ica_properties(ica, inst, picks=None, axes=None, dB=True,
     return all_fig
 
 
-def _prepare_data_plot_ica_properties(inst, ica, reject_by_annotation=True,
+def _fast_plot_ica_properties(ica, inst, picks=None, axes=None, dB=True,
+                              plot_std=True, topomap_args=None, reject='auto',
+                              image_args=None, psd_args=None, figsize=None,
+                              show=True, reject_by_annotation=True,
+                              precomputed_data=None):
+    from ..preprocessing import ICA
+
+    # input checks and defaults
+    # -------------------------
+    _validate_type(ica, ICA, "ica", "ICA")
+    _validate_type(plot_std, (bool, 'numeric'), 'plot_std')
+    if isinstance(plot_std, bool):
+        num_std = 1. if plot_std else 0.
+    else:
+        plot_std = True
+    num_std = float(plot_std)
+
+    # if no picks given - plot the first 5 components
+    limit = min(5, ica.n_components_) if picks is None else len(ica.ch_names)
+    picks = _picks_to_idx(ica.info, picks, 'all')[:limit]
+    if axes is None:
+        fig, axes = _create_properties_layout(figsize=figsize)
+    else:
+        if len(picks) > 1:
+            raise ValueError('Only a single pick can be drawn '
+                             'to a set of axes.')
+        from .utils import _validate_if_list_of_axes
+        _validate_if_list_of_axes(axes, obligatory_len=5)
+        fig = axes[0].get_figure()
+
+    psd_args = dict() if psd_args is None else psd_args
+    topomap_args = dict() if topomap_args is None else topomap_args
+    image_args = dict() if image_args is None else image_args
+    image_args["ts_args"] = dict(truncate_xaxis=False, show_sensors=False)
+    if plot_std:
+        from ..stats.parametric import _parametric_ci
+        image_args["ts_args"]["ci"] = _parametric_ci
+    elif "ts_args" not in image_args or "ci" not in image_args["ts_args"]:
+        image_args["ts_args"]["ci"] = False
+
+    for item_name, item in (("psd_args", psd_args),
+                            ("topomap_args", topomap_args),
+                            ("image_args", image_args)):
+        _validate_type(item, dict, item_name, "dictionary")
+    if dB is not None:
+        _validate_type(dB, bool, "dB", "bool")
+
+    # calculations
+    # ------------
+    if isinstance(precomputed_data, tuple):
+        kind, dropped_indices, epochs_src, data = precomputed_data
+    else:
+        kind, dropped_indices, epochs_src, data = _prepare_data_ica_properties(
+            inst, ica, reject_by_annotation, reject)
+    ica_data = np.swapaxes(data[:, picks, :], 0, 1)
+    dropped_src = ica_data
+
+    # spectrum
+    Nyquist = inst.info['sfreq'] / 2.
+    lp = inst.info['lowpass']
+    if 'fmax' not in psd_args:
+        psd_args['fmax'] = min(lp * 1.25, Nyquist)
+    plot_lowpass_edge = lp < Nyquist and (psd_args['fmax'] > lp)
+    psds, freqs = psd_multitaper(epochs_src, picks=picks, **psd_args)
+
+    def set_title_and_labels(ax, title, xlab, ylab):
+        if title:
+            ax.set_title(title)
+        if xlab:
+            ax.set_xlabel(xlab)
+        if ylab:
+            ax.set_ylabel(ylab)
+        ax.axis('auto')
+        ax.tick_params('both', labelsize=8)
+        ax.axis('tight')
+
+    # plot
+    # ----
+    all_fig = list()
+    for idx, pick in enumerate(picks):
+
+        # calculate component-specific spectrum stuff
+        psd_ylabel, psds_mean, spectrum_std = _get_psd_label_and_std(
+            psds[:, idx, :].copy(), dB, ica, num_std)
+
+        # if more than one component, spawn additional figures and axes
+        if idx > 0:
+            fig, axes = _create_properties_layout(figsize=figsize)
+
+        # we reconstruct an epoch_variance with 0 where indexes where dropped
+        epoch_var = np.var(ica_data[idx], axis=1)
+        drop_var = np.var(dropped_src[idx], axis=1)
+        drop_indices_corrected = \
+            (dropped_indices -
+             np.arange(len(dropped_indices))).astype(int)
+        epoch_var = np.insert(arr=epoch_var,
+                              obj=drop_indices_corrected,
+                              values=drop_var[dropped_indices],
+                              axis=0)
+
+        # the actual plot
+        fig = _plot_ica_properties(
+            pick, ica, inst, psds_mean, freqs, ica_data.shape[1],
+            epoch_var, plot_lowpass_edge,
+            epochs_src, set_title_and_labels, plot_std, psd_ylabel,
+            spectrum_std, topomap_args, image_args, fig, axes, kind,
+            dropped_indices)
+        all_fig.append(fig)
+
+    plt_show(show)
+    return all_fig
+
+
+def _prepare_data_ica_properties(inst, ica, reject_by_annotation=True,
                                       reject='auto'):
     from ..io.base import BaseRaw
     from ..io import RawArray
@@ -476,7 +585,7 @@ def _prepare_data_plot_ica_properties(inst, ica, reject_by_annotation=True,
         epochs_src = ica.get_sources(inst)
         dropped_indices = []
         kind = "Epochs"
-    return kind, dropped_indices, epochs_src
+    return kind, dropped_indices, epochs_src, epochs_src.get_data()
 
 
 def _plot_ica_sources_evoked(evoked, picks, exclude, title, show, ica,
